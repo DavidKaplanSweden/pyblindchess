@@ -205,7 +205,6 @@ if __name__ == "__main__":
     while True:
         # Human player:
         game.do_human_move()
-        print(game.game_state)
         if game.game_state is not GameState.ONGOING:
             print(f"\n*** {game.game_state.value.upper()}! ***\n")
             break
