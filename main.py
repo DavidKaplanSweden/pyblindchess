@@ -35,6 +35,17 @@ SPLASH_MESSAGE = r"""
 START_POSITIONS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 
+HELP_MESSAGE = """
+Commands:
+
+    h or help   - show this information
+    b or board  - show the current board
+    i or info   - show information about the current position
+    q or quit   - leave the game
+    exit        - same as quit
+
+"""
+
 class GameState(Enum):
     """Keeps track of the game state"""
 
@@ -120,6 +131,11 @@ class Game:
 
     def do_command(self, command: str) -> bool:
         """Execute a user command. Returns False if it was a move, True otherwise"""
+        # Help
+        if command.lower() in ["h", "help"]:
+            print(HELP_MESSAGE)
+            return True
+        
         # Info
         if command.lower() in ["i", "info"]:
             if game.board.is_check():
