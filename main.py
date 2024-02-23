@@ -1,14 +1,15 @@
-"""Main module of the blind chess game.
+"""Main module of the blind chess game."""
 
-Only supports humans playing white at the moment.
-"""
-
+import os
+import random
 import sys
 from enum import Enum
 
 import chess
 import stockfish
 
+
+STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH", "/opt/homebrew/bin/stockfish")
 STOCKFISH_SETTINGS = {
     "Debug Log File": "",
     "Contempt": 0,
@@ -25,17 +26,17 @@ STOCKFISH_SETTINGS = {
     "UCI_LimitStrength": "true",  # "false",
     "UCI_Elo": 1350,
 }
-
+START_POSITION = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 SPLASH_MESSAGE = r"""
  ____  __    __  __ _  ____     ___  _  _  ____  ____  ____
 (  _ \(  )  (  )(  ( \(    \   / __)/ )( \(  __)/ ___)/ ___)
  ) _ (/ (_/\ )( /    / ) D (  ( (__ ) __ ( ) _) \___ \\___ \
 (____/\____/(__)\_)__)(____/   \___)\_)(_/(____)(____/(____/
 """
-START_POSITIONS = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
-
-
 HELP_MESSAGE = """
+At the input prompt, enter your move as SAN (e.g. e4, exd5, Bc2 etc)
+or one of the commands specified below
+
 Commands:
 
     h or help   - show this information
@@ -45,6 +46,7 @@ Commands:
     exit        - same as quit
 
 """
+
 
 class GameState(Enum):
     """Keeps track of the game state"""
@@ -56,11 +58,28 @@ class GameState(Enum):
     RESIGNED = "resigned"
 
 
+class StockfishMod(stockfish.Stockfish):
+    """Modified Stockfish class, make the destructor more robust"""
+
+    def __del__(self):
+        """Catch attribute errors thrown during cleanup"""
+        try:
+            super().__del__()
+        except AttributeError:
+            pass
+
 class Analyzer:  # pylint: disable=too-few-public-methods
     """Stockfish analyzer for evaluation of positions"""
 
+    class StockfishError(Exception):
+        """Raise when there are issues with Stockfish"""
+
     def __init__(self) -> None:
-        self.stockfish = stockfish.Stockfish("/opt/homebrew/bin/stockfish")
+        try:
+            self.stockfish = StockfishMod(STOCKFISH_PATH)
+        except (AttributeError, FileNotFoundError):
+            print("Could not find Stockfish. Exiting...")
+            sys.exit(1)
         self.stockfish.set_elo_rating(3500)
 
     def get_evaluation(self, fen_position: str) -> str:
@@ -71,7 +90,7 @@ class Analyzer:  # pylint: disable=too-few-public-methods
             # centipawns:
             return evaluation["value"] / 100
         if evaluation["type"] == "mate":
-            return f"mate {evaluation['value']}"
+            return f"""mate {evaluation["value"]}"""
         return "? " + str(evaluation)
 
 
@@ -81,15 +100,13 @@ class Game:
     class CommandError(Exception):
         """Raise if there are any issues with the command input"""
 
-    def __init__(self, start_pos: str = "") -> None:
+    def __init__(self, *, start_pos: str = "") -> None:
         if start_pos:
             self.start_positions = start_pos
         else:
-            self.start_positions = START_POSITIONS
+            self.start_positions = START_POSITION
         self.board = chess.Board(start_pos)
-        self.stockfish = stockfish.Stockfish(
-            "/opt/homebrew/bin/stockfish", parameters=STOCKFISH_SETTINGS
-        )
+        self.stockfish = StockfishMod(STOCKFISH_PATH, parameters=STOCKFISH_SETTINGS)
         self.analyzer = Analyzer()
         self.stockfish.set_fen_position(self.board.fen())
         self.move_counter = int(start_pos.split(" ")[-1])
@@ -135,10 +152,10 @@ class Game:
         if command.lower() in ["h", "help"]:
             print(HELP_MESSAGE)
             return True
-        
+
         # Info
         if command.lower() in ["i", "info"]:
-            if game.board.is_check():
+            if self.board.is_check():
                 print("     In check!")
             print(
                 "     Allowed to castle:",
@@ -159,7 +176,7 @@ class Game:
 
         return False
 
-    def do_human_move(self) -> str:
+    def do_human_move(self) -> bool:
         """Get input from the human player"""
         try:
             command = input(f"{self.move_counter}. Your move or command: ")
@@ -178,10 +195,12 @@ class Game:
                 print(f"😨 {self.CommandError(exc)}")
         if not self.game_state == GameState.RESIGNED:
             self.update_game_state()
+        
+        return self.opponents_turn
 
-    def do_stockfish_move(self):
+    def do_stockfish_move(self) -> bool:
         """Let Stockfish do a move"""
-        print(f"{len(str(self.move_counter)) * ' '}  Hmm....  ", end="", flush=True)
+        print(f"{self.move_counter}. Hmm....  ", end="", flush=True)
         self.stockfish.set_fen_position(self.board.fen())
         ai_move_uci = self.stockfish.get_best_move()
         # ai_move_uci = STOCKFISH.get_top_moves(5)[-1]
@@ -196,9 +215,12 @@ class Game:
         opponent_move = ai_move
 
         response = self.board.san(opponent_move)
-        print("My response:", response)
+        print("    My move:", response)
         self.board.push(opponent_move)
         self.update_game_state()
+        self.opponents_turn = True
+
+        return True
 
     def show_board(self):
         """Draw the board with ASCII characters"""
@@ -206,41 +228,78 @@ class Game:
         print(self.stockfish.get_board_visual())
 
 
-if __name__ == "__main__":
-    print(SPLASH_MESSAGE)
-
-    if len(sys.argv) > 1:
-        start_positions = sys.argv[1]
-    else:
-        start_positions = START_POSITIONS  # pylint: disable=invalid-name
-
-    # Main loop:
-    game = Game(start_pos=start_positions)
-    print(game.get_welcome_message())
+def main(*, start_positions=None):
+    """Game controller"""
+    ################
+    # PREPARE GAME
+    #
+    print("Would you prefer to play as white, black or random?")
+    side = input("Enter b, w or r: ")
     print()
-    while True:
-        # Human player:
-        game.do_human_move()
-        if game.game_state is not GameState.ONGOING:
-            print(f"\n*** {game.game_state.value.upper()}! ***\n")
-            break
-        if not game.opponents_turn:
-            # Skip opponent's move
-            continue
+    print("What elo rating would you prefer Stockfish to have?")
+    elo = input("Enter the elo number or press enter for default (1350): ")
+    print()
+    if elo:
+        STOCKFISH_SETTINGS["UCI_Elo"] = elo
 
-        game.do_stockfish_move()
+    if not start_positions:
+        start_positions = START_POSITION
 
-        if game.game_state is not GameState.ONGOING:
-            print(f"\n*** {game.game_state.value.upper()}! ***\n")
-            break
+    # Create the game:
+    game = Game(start_pos=start_positions)
+    welcome_message = game.get_welcome_message()
+    print("-" * (len(welcome_message) + 4))
+    print("  " + welcome_message)
+    print("-" * (len(welcome_message) + 4))
+
+    print(HELP_MESSAGE)
+
+    #############
+    # MAIN LOOP
+    #
+
+    if side.lower() in ("r", "random"):
+        side = random.choice(("black", "white"))
+
+    if side.lower() in ("b", "black"):
+        print("You play black!")
+        order = (game.do_stockfish_move, game.do_human_move)
+    elif side.lower() in ("w", "white"):
+        print("You play white!")
+        order = (game.do_human_move, game.do_stockfish_move)
+    else:
+        print(f"Illegal side, has to be one of r, b, or w! You entered {side}")
+        sys.exit(1)
+
+    game.opponents_turn = True
+    should_continue = True
+    while should_continue:
+        first_move, second_move = order
+
+        for move in (first_move, second_move):
+            if not game.opponents_turn:
+                # Skip opponent's move
+                continue
+            
+            is_move = False
+            while not is_move:
+                is_move = move()
+                if game.game_state is not GameState.ONGOING:
+                    print(f"\n*** {game.game_state.value.upper()}! ***\n")
+                    should_continue = False
+                    break
 
         game.move_counter += 1
 
+    ###############
+    # END OF GAME
+    #
     # Print board:
     try:
         print(game.stockfish.get_board_visual())
     except stockfish.models.StockfishException as _exc:
         print(f"Could not draw the board due to a Stockfish error: {_exc}")
+    # Print FEN:
     print("----- FEN: -----")
     print(game.board.fen())
     # Print PGN:
@@ -248,3 +307,13 @@ if __name__ == "__main__":
         print("----- PGN: -----")
         print(game.get_game_as_pgn())
     print("----------------")
+
+
+if __name__ == "__main__":
+    print(SPLASH_MESSAGE)
+
+    POS = None
+    if len(sys.argv) > 1:
+        POS = sys.argv[1]
+
+    main(start_positions=POS)
